@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.5
+Type=Application
+Name=DeepSeek Web Bridge
+Comment=Start DeepSeek Web Bridge and open its Web UI
+Exec=sh -c "exec /bin/sh \\\"\\$(dirname -- \\\"\\$1\\\")/START.sh\\\"" desktop-launcher %k
+Terminal=true
+Icon=utilities-terminal
+Categories=Development;

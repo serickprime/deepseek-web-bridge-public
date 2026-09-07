@@ -1,0 +1,26 @@
+{
+  "name": "deepseek-web-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local OpenAI/Anthropic-compatible bridge for an authenticated DeepSeek Web session",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "auth": "tsx scripts/auth.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "ui": "tsx scripts/launcher.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

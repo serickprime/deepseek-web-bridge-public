@@ -1,0 +1,5 @@
+START.bat -text whitespace=cr-at-eol
+START.command text eol=lf
+START.sh text eol=lf
+*.desktop text eol=lf
+scripts/desktopStart.mjs text eol=lf
