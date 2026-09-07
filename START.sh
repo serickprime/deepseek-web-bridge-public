@@ -42,6 +42,14 @@ if [ "$NODE_MAJOR" -lt 20 ]; then
   exit 1
 fi
 
+if ! command -v npm >/dev/null 2>&1; then
+  printf '%s\n' 'Не найден npm. Установите Node.js 20 или новее с официального сайта.'
+  printf '%s\n' 'Открываю официальную страницу загрузки Node.js...'
+  open_node_download
+  pause_on_error
+  exit 1
+fi
+
 node "$SCRIPT_DIR/scripts/desktopStart.mjs"
 START_STATUS=$?
 if [ "$START_STATUS" -ne 0 ]; then

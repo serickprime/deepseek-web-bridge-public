@@ -1,0 +1,88 @@
+name: Launcher smoke
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  launcher-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: Smoke launcher on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          test "$(git ls-files -s START.command | awk '{print $1}')" = "100755"
+          test "$(git ls-files -s START.sh | awk '{print $1}')" = "100755"
+          sh -n START.command START.sh
+          node dist/index.js > bridge.log 2>&1 &
+          bridge_pid=$!
+          trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            curl --fail --silent http://127.0.0.1:9655/health && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:9655/health
+          ./START.command
+          curl --fail --silent http://127.0.0.1:9655/
+
+      - name: Smoke launcher on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          test "$(git ls-files -s START.command | awk '{print $1}')" = "100755"
+          test "$(git ls-files -s START.sh | awk '{print $1}')" = "100755"
+          sh -n START.command START.sh
+          node dist/index.js > bridge.log 2>&1 &
+          bridge_pid=$!
+          trap 'kill "$bridge_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            curl --fail --silent http://127.0.0.1:9655/health && break
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:9655/health
+          ./START.sh
+          curl --fail --silent http://127.0.0.1:9655/
+
+      - name: Smoke launcher on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD 'START.bat'))
+          if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw 'START.bat must not contain a UTF-8 BOM'
+          }
+          $bridge = Start-Process node -ArgumentList 'dist/index.js' -PassThru -WindowStyle Hidden
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              try {
+                if ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9655/health).StatusCode -eq 200) {
+                  $ready = $true
+                  break
+                }
+              } catch {}
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) { throw 'Bridge did not become healthy' }
+            $launcher = Start-Process cmd.exe -ArgumentList '/d', '/c', 'START.bat' -Wait -PassThru -WindowStyle Hidden
+            if ($launcher.ExitCode -ne 0) { throw "START.bat exited with $($launcher.ExitCode)" }
+            if ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9655/).StatusCode -ne 200) {
+              throw 'Web UI is unavailable'
+            }
+          } finally {
+            Stop-Process -Id $bridge.Id -Force -ErrorAction SilentlyContinue
+          }
