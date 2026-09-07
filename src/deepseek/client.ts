@@ -281,7 +281,7 @@ export class DeepSeekClient {
       attemptParentState = "repair_candidate";
     }
 
-    const inspection = inspectToolCallFromOutput(output, allowedNames);
+    const inspection = inspectToolCallFromOutput(output, toolCatalog.available);
     let toolCall = inspection.toolCall;
     if (guardEvidence.isInformationalRequest) toolCall = null;
     let malformedToolIntent = inspection.malformedToolIntent && !guardEvidence.isInformationalRequest;
@@ -369,7 +369,7 @@ export class DeepSeekClient {
         attemptParent = output.candidateMessageId;
         attemptParentState = "repair_candidate";
       }
-      const retryInspection = inspectToolCallFromOutput(output, allowedNames);
+      const retryInspection = inspectToolCallFromOutput(output, toolCatalog.available);
       toolCall = retryInspection.toolCall;
       if (guardEvidence.isInformationalRequest) toolCall = null;
       malformedToolIntent = retryInspection.malformedToolIntent && !guardEvidence.isInformationalRequest;

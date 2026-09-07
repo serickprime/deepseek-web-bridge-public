@@ -1,6 +1,7 @@
 import { BridgeError } from "../utils/errors.js";
 import { isRecord } from "../utils/json.js";
-import type { CanonicalMessage, CanonicalToolCall } from "../api/canonical.js";
+import { isDeepStrictEqual } from "node:util";
+import type { CanonicalMessage, CanonicalTool, CanonicalToolCall } from "../api/canonical.js";
 
 const MAX_TOOL_BYTES = 48 * 1024;
 const MAX_TOOL_CALL_DEPTH = 32;
@@ -34,6 +35,140 @@ function isPlainObject(value: unknown): boolean {
   return prototype === Object.prototype || prototype === null;
 }
 
+type ToolCatalogInput = readonly string[] | readonly CanonicalTool[];
+
+interface ToolValidationContext {
+  allowedNames: string[];
+  schemaByName: Map<string, Record<string, unknown>>;
+}
+
+function toolValidationContext(tools: ToolCatalogInput): ToolValidationContext {
+  const allowedNames: string[] = [];
+  const schemaByName = new Map<string, Record<string, unknown>>();
+  for (const tool of tools) {
+    if (typeof tool === "string") {
+      allowedNames.push(tool);
+      continue;
+    }
+    allowedNames.push(tool.name);
+    schemaByName.set(tool.name, tool.inputSchema);
+  }
+  return { allowedNames, schemaByName };
+}
+
+function schemaTypeMatches(value: unknown, type: string): boolean {
+  switch (type) {
+    case "null": return value === null;
+    case "boolean": return typeof value === "boolean";
+    case "string": return typeof value === "string";
+    case "number": return typeof value === "number" && Number.isFinite(value);
+    case "integer": return typeof value === "number" && Number.isSafeInteger(value);
+    case "array": return Array.isArray(value);
+    case "object": return isPlainObject(value);
+    default: return false;
+  }
+}
+
+function resolveLocalSchemaRef(root: Record<string, unknown>, ref: string): Record<string, unknown> | null {
+  if (!ref.startsWith("#/")) return null;
+  let current: unknown = root;
+  for (const rawToken of ref.slice(2).split("/")) {
+    const token = rawToken.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (isForbiddenKey(token) || !isPlainObject(current)
+      || !Object.prototype.hasOwnProperty.call(current, token)) return null;
+    current = (current as Record<string, unknown>)[token];
+  }
+  return isPlainObject(current) ? current as Record<string, unknown> : null;
+}
+
+function matchesToolInputSchema(
+  value: unknown,
+  schema: Record<string, unknown>,
+  root = schema,
+  depth = 0,
+): boolean {
+  if (depth > MAX_TOOL_CALL_DEPTH) return false;
+
+  if (typeof schema.$ref === "string") {
+    const resolved = resolveLocalSchemaRef(root, schema.$ref);
+    return resolved !== null && matchesToolInputSchema(value, resolved, root, depth + 1);
+  }
+  if (Object.prototype.hasOwnProperty.call(schema, "const") && !isDeepStrictEqual(value, schema.const)) return false;
+  if (Array.isArray(schema.enum) && !schema.enum.some(item => isDeepStrictEqual(item, value))) return false;
+
+  if (Array.isArray(schema.allOf)
+    && !schema.allOf.every(item => isPlainObject(item)
+      && matchesToolInputSchema(value, item as Record<string, unknown>, root, depth + 1))) return false;
+  if (Array.isArray(schema.anyOf)
+    && !schema.anyOf.some(item => isPlainObject(item)
+      && matchesToolInputSchema(value, item as Record<string, unknown>, root, depth + 1))) return false;
+  if (Array.isArray(schema.oneOf)) {
+    const matches = schema.oneOf.filter(item => isPlainObject(item)
+      && matchesToolInputSchema(value, item as Record<string, unknown>, root, depth + 1));
+    if (matches.length !== 1) return false;
+  }
+  if (isPlainObject(schema.not)
+    && matchesToolInputSchema(value, schema.not as Record<string, unknown>, root, depth + 1)) return false;
+
+  const declaredTypes = typeof schema.type === "string"
+    ? [schema.type]
+    : Array.isArray(schema.type) && schema.type.every(type => typeof type === "string")
+      ? schema.type as string[]
+      : [];
+  if (declaredTypes.length > 0 && !declaredTypes.some(type => schemaTypeMatches(value, type))) return false;
+
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength) return false;
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return false;
+    if (typeof schema.pattern === "string") {
+      try {
+        if (!new RegExp(schema.pattern, "u").test(value)) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (typeof schema.minimum === "number" && value < schema.minimum) return false;
+    if (typeof schema.maximum === "number" && value > schema.maximum) return false;
+    if (typeof schema.exclusiveMinimum === "number" && value <= schema.exclusiveMinimum) return false;
+    if (typeof schema.exclusiveMaximum === "number" && value >= schema.exclusiveMaximum) return false;
+  }
+
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) return false;
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return false;
+    if (schema.uniqueItems === true
+      && value.some((item, index) => value.slice(0, index).some(previous => isDeepStrictEqual(previous, item)))) return false;
+    if (isPlainObject(schema.items)
+      && !value.every(item => matchesToolInputSchema(item, schema.items as Record<string, unknown>, root, depth + 1))) return false;
+  }
+
+  if (isPlainObject(value)) {
+    const record = value as Record<string, unknown>;
+    const properties = isPlainObject(schema.properties)
+      ? schema.properties as Record<string, unknown>
+      : {};
+    if (Array.isArray(schema.required)) {
+      if (!schema.required.every(key => typeof key === "string"
+        && Object.prototype.hasOwnProperty.call(record, key))) return false;
+    }
+    for (const [key, item] of Object.entries(record)) {
+      const propertySchema = properties[key];
+      if (isPlainObject(propertySchema)) {
+        if (!matchesToolInputSchema(item, propertySchema as Record<string, unknown>, root, depth + 1)) return false;
+        continue;
+      }
+      if (schema.additionalProperties === false) return false;
+      if (isPlainObject(schema.additionalProperties)
+        && !matchesToolInputSchema(item, schema.additionalProperties as Record<string, unknown>, root, depth + 1)) return false;
+    }
+  }
+
+  return true;
+}
+
 function makeId(): string {
   return `call_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -61,7 +196,11 @@ function inspectNestedValues(value: unknown, depth = 0): string | null {
 
 // --- Text extraction for model output that wraps JSON in prose ---
 
-function extractToolCallFromText(text: string, allowedNames: string[]): ToolCallCandidateInspection {
+function extractToolCallFromText(
+  text: string,
+  allowedNames: string[],
+  schemaByName: Map<string, Record<string, unknown>>,
+): ToolCallCandidateInspection {
   const toolCallIdx = text.indexOf('"tool_call"');
   const nameIdx = text.indexOf('"name"');
   const searchIdx = toolCallIdx >= 0 ? toolCallIdx : nameIdx;
@@ -131,10 +270,14 @@ function extractToolCallFromText(text: string, allowedNames: string[]): ToolCall
     return { toolCall: null, reason: "extracted_wrong_shape" };
   }
 
-  return validateToolValue(toolValue, allowedNames);
+  return validateToolValue(toolValue, allowedNames, schemaByName);
 }
 
-function validateToolValue(value: unknown, allowedNames: string[]): ToolCallCandidateInspection {
+function validateToolValue(
+  value: unknown,
+  allowedNames: string[],
+  schemaByName: Map<string, Record<string, unknown>>,
+): ToolCallCandidateInspection {
   if (!isPlainObject(value)) return { toolCall: null, reason: "invalid_tool_shape" };
 
   const v = value as Record<string, unknown>;
@@ -155,6 +298,11 @@ function validateToolValue(value: unknown, allowedNames: string[]): ToolCallCand
   const nestedReason = inspectNestedValues(v.arguments);
   if (nestedReason) return { toolCall: null, reason: nestedReason };
 
+  const schema = schemaByName.get(v.name);
+  if (schema && !matchesToolInputSchema(v.arguments, schema)) {
+    return { toolCall: null, reason: "input_schema_mismatch" };
+  }
+
   let argumentsJson: string;
   try {
     argumentsJson = JSON.stringify(v.arguments);
@@ -168,11 +316,45 @@ function validateToolValue(value: unknown, allowedNames: string[]): ToolCallCand
   };
 }
 
-function inspectToolCall(text: string, allowedNames: string[]): ToolCallCandidateInspection {
+function inspectCanonicalToolCall(
+  text: string,
+  allowedNames: string[],
+  schemaByName: Map<string, Record<string, unknown>>,
+): ToolCallCandidateInspection | null {
+  const match = text.match(/^<bridge_tool_call>\s*([\s\S]*?)\s*<\/bridge_tool_call>$/);
+  if (!match) return null;
+
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(match[1]!);
+  } catch {
+    return { toolCall: null, reason: "canonical_json_invalid" };
+  }
+  if (!isPlainObject(envelope)) return { toolCall: null, reason: "canonical_invalid_shape" };
+  const record = envelope as Record<string, unknown>;
+  if (Object.keys(record).length !== 2
+    || !Object.prototype.hasOwnProperty.call(record, "name")
+    || !Object.prototype.hasOwnProperty.call(record, "input")) {
+    return { toolCall: null, reason: "canonical_invalid_shape" };
+  }
+  return validateToolValue({ name: record.name, arguments: record.input }, allowedNames, schemaByName);
+}
+
+function inspectToolCall(
+  text: string,
+  allowedNames: string[],
+  schemaByName: Map<string, Record<string, unknown>>,
+  allowCanonical = true,
+): ToolCallCandidateInspection {
   if (typeof text !== "string") return { toolCall: null, reason: "input_not_string" };
   if (Buffer.byteLength(text, "utf8") > MAX_TOOL_BYTES) return { toolCall: null, reason: "input_too_large" };
   const trimmed = text.trim();
   if (!trimmed) return { toolCall: null, reason: "empty_input" };
+
+  if (allowCanonical) {
+    const canonical = inspectCanonicalToolCall(trimmed, allowedNames, schemaByName);
+    if (canonical) return canonical;
+  }
 
   // Try <tool_call> wrapper first
   const tagMatch = trimmed.match(/^<tool_call>\s*([\s\S]*?)\s*<\/tool_call>$/i);
@@ -181,7 +363,7 @@ function inspectToolCall(text: string, allowedNames: string[]): ToolCallCandidat
     envelope = JSON.parse(tagMatch ? tagMatch[1]! : trimmed);
   } catch {
     // Model may prepend prose before JSON. Try to extract tool_call JSON from text.
-    return extractToolCallFromText(trimmed, allowedNames);
+    return extractToolCallFromText(trimmed, allowedNames, schemaByName);
   }
 
   if (!isPlainObject(envelope)) return { toolCall: null, reason: "invalid_envelope" };
@@ -203,11 +385,29 @@ function inspectToolCall(text: string, allowedNames: string[]): ToolCallCandidat
   }
   if (!isPlainObject(value)) return { toolCall: null, reason: "invalid_tool_shape" };
 
-  return validateToolValue(value, allowedNames);
+  return validateToolValue(value, allowedNames, schemaByName);
 }
 
 function regexEscape(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsTopLevelCanonicalMarker(content: string): boolean {
+  if (content.trimStart().startsWith("<bridge_tool_call>")) return true;
+  const outsideFences: string[] = [];
+  let fence: "```" | "~~~" | null = null;
+  for (const line of content.split(/\r?\n/)) {
+    const fenceMatch = line.match(/^\s*(```|~~~)/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1] as "```" | "~~~";
+      if (fence === null) fence = marker;
+      else if (fence === marker) fence = null;
+      continue;
+    }
+    if (fence !== null || /^\s*>/.test(line)) continue;
+    outsideFences.push(line);
+  }
+  return outsideFences.some(line => /^\s*<\/?bridge_tool_call>\s*$/.test(line));
 }
 
 function looksLikeBracketedToolInvocation(content: string, allowedNames: string[]): boolean {
@@ -223,28 +423,36 @@ export function looksLikeMalformedToolIntent(content: string, allowedNames: stri
 
   if (looksLikeBracketedToolInvocation(trimmed, allowedNames)) return true;
 
+  if (containsTopLevelCanonicalMarker(trimmed)) return true;
+
   const allowedPattern = allowedNames.map(regexEscape).join("|");
   const jsonName = new RegExp(`["'](?:name|tool)["']\\s*:\\s*["'](?:${allowedPattern})["']`, "i");
   const tagName = new RegExp(`<tool_call\\b[^>]*\\bname\\s*=\\s*["'](?:${allowedPattern})["']`, "i");
   const prefixedName = new RegExp(`(?:^|\\n)\\s*Tool:\\s*(?:${allowedPattern})(?:\\s|$)`, "i");
+  const actionPair = new RegExp(
+    `(?:^|\\n)\\s*(?:Action|Tool)\\s*:\\s*(?:${allowedPattern})\\s*(?:\\r?\\n)+\\s*(?:Action\\s+Input|Tool\\s+Input|Input)\\s*:`,
+    "i",
+  );
   // OpenAI-style pseudo-XML envelope (<tool_calls><invoke name="...">...) is a
   // known model output format that the Bridge cannot execute as-is. Only an
   // executable shape counts: an <invoke> opening tag followed by a
   // <parameter> child. A bare quoted <invoke ...> in prose is not intent.
   const pseudoInvoke = new RegExp(`<invoke\\s+name\\s*=\\s*["'](?:${allowedPattern})["'][^>]*>\\s*<parameter\\b`, "i");
-  const hasKnownName = jsonName.test(trimmed) || tagName.test(trimmed) || prefixedName.test(trimmed) || pseudoInvoke.test(trimmed);
+  const hasKnownName = jsonName.test(trimmed) || tagName.test(trimmed) || prefixedName.test(trimmed)
+    || actionPair.test(trimmed) || pseudoInvoke.test(trimmed);
   const hasNameField = /["'](?:name|tool)["']\s*:/.test(trimmed) || /<tool_call\b[^>]*\bname\s*=/.test(trimmed);
   const hasEnvelopeMarker = /["']tool_call["']\s*:|<tool_call\b/i.test(trimmed);
   const hasDirectShape = /["'](?:name|tool)["']\s*:/.test(trimmed) && /["']arguments["']\s*:/.test(trimmed);
 
   if (hasNameField) return hasKnownName && (hasEnvelopeMarker || hasDirectShape || prefixedName.test(trimmed));
-  return hasEnvelopeMarker || prefixedName.test(trimmed) || pseudoInvoke.test(trimmed);
+  return hasEnvelopeMarker || prefixedName.test(trimmed) || actionPair.test(trimmed) || pseudoInvoke.test(trimmed);
 }
 
 export function inspectToolCallFromOutput(
   output: { content?: string; reasoning?: string },
-  allowedNames: string[],
+  tools: ToolCatalogInput,
 ): ToolCallOutputInspection {
+  const { allowedNames, schemaByName } = toolValidationContext(tools);
   if (!output || typeof output.content !== "string") {
     return {
       toolCall: null,
@@ -255,7 +463,7 @@ export function inspectToolCallFromOutput(
   }
   const rejected: ToolCallOutputInspection[] = [];
   if (output.content.trim()) {
-    const result = inspectToolCall(output.content, allowedNames);
+    const result = inspectToolCall(output.content, allowedNames, schemaByName);
     if (result.toolCall) {
       return {
         ...result,
@@ -270,7 +478,7 @@ export function inspectToolCallFromOutput(
     });
   }
   if (typeof output.reasoning === "string" && output.reasoning.trim()) {
-    const result = inspectToolCall(output.reasoning, allowedNames);
+    const result = inspectToolCall(output.reasoning, allowedNames, schemaByName, false);
     if (result.toolCall) {
       return {
         ...result,
@@ -2216,7 +2424,7 @@ export function createToolRetryPrompt(
     );
     if (!context.allRequirementsFulfilled) {
       lines.push(
-        "Do not describe the action as text. Return exactly one correct tool call using valid JSON.",
+        "Do not describe the action as text. Return exactly one canonical <bridge_tool_call> block using valid JSON.",
         "Every backslash inside a JSON string must be correctly escaped (use \\\\ for a literal backslash).",
       );
     }
@@ -2284,11 +2492,14 @@ export function createToolRetryPrompt(
     );
   } else {
     lines.push(
-      "For a request about the real environment or an external action, return one real tool_call JSON that addresses only a listed missing or stale requirement.",
-      "Output ONLY the JSON envelope below — nothing else:",
-      '{"tool_call":{"name":"TOOL_NAME","arguments":{}}}',
+      "For a request about the real environment or an external action, return one canonical tool call that addresses only a listed missing or stale requirement.",
+      "Output ONLY the single canonical block below — nothing else:",
+      "<bridge_tool_call>",
+      '{"name":"TOOL_NAME","input":{}}',
+      "</bridge_tool_call>",
       `Allowed tool names: ${JSON.stringify(allowedNames)}`,
-      "No reasoning. No explanations. No Markdown. No text before or after.",
+      "Use the current tool catalog schema for input. Do not use Action:, Action Input:, Tool:, Markdown JSON, pseudo-commands, or a legacy tool_call envelope.",
+      "No reasoning. No explanations. No Markdown. Only whitespace may appear outside the canonical block.",
       "A success final answer is allowed only after the client sends a real tool_result marked successful in the current tool cycle for every requested action.",
       "If recovery is impossible after a real failure, report the failure honestly and do not claim the action succeeded.",
       "If no external action or environment data is requested, output only your final text answer.",
@@ -2388,7 +2599,7 @@ export function buildUpstreamPrompt(body: Record<string, unknown>, kind: string,
 
 export function parseToolInvocation(text: string, toolNames?: Set<string>): ToolParseResult {
   const allowedNames = toolNames ? [...toolNames] : [];
-  const { toolCall, reason } = inspectToolCall(text, allowedNames);
+  const { toolCall, reason } = inspectToolCall(text, allowedNames, new Map());
   if (toolCall) return { text: "", toolCall };
 
   if (toolNames && toolNames.size > 0) {

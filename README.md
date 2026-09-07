@@ -14,7 +14,7 @@ DeepSeek Web Bridge позволяет запускать Claude Code и OpenCod
 
 ## Как скачать
 
-Откройте [GitHub Releases](https://github.com/serickprime/deepseek-web-bridge-public/releases/latest) и скачайте ZIP версии `v1.0.1`.
+Откройте [GitHub Releases](https://github.com/serickprime/deepseek-web-bridge-public/releases/latest) и скачайте ZIP версии `v1.1.0`.
 
 ## Windows
 
