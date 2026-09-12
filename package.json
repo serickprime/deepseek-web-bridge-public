@@ -1,8 +1,8 @@
 {
   "name": "deepseek-web-bridge",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Local OpenAI/Anthropic-compatible bridge for an authenticated DeepSeek Web session",
+  "description": "Local OpenAI/Anthropic-compatible bridge for your own authenticated DeepSeek Web session",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -15,7 +15,14 @@
     "ui": "tsx scripts/launcher.ts"
   },
   "dependencies": {
+    "exceljs": "4.4.0",
+    "pdfjs-dist": "4.10.38",
     "ws": "^8.18.0"
+  },
+  "overrides": {
+    "exceljs": {
+      "uuid": "11.1.1"
+    }
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

@@ -13,7 +13,6 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set(["/", "/health", "/read
 export function isPublicPath(method: string, path: string): boolean {
   const pathname = path.split("?")[0] ?? path;
   if (pathname.startsWith("/assets/")) return true;
-  if (pathname.startsWith("/bridge/")) return true;
   if (method !== "GET") return false;
   return PUBLIC_PATHS.has(pathname);
 }

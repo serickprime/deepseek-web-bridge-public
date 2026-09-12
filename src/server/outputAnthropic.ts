@@ -1,6 +1,7 @@
 import type { CanonicalRequest, CanonicalResult, CanonicalToolCall } from "../api/canonical.js";
 import { BridgeError } from "../utils/errors.js";
 import { estimateTokenCount } from "../utils/tokenEstimate.js";
+import { randomHex } from "../utils/crypto.js";
 
 export type AnthropicErrorType =
   | "authentication_error"
@@ -110,7 +111,7 @@ export function toAnthropicMessage(
   for (const call of result.toolCalls) content.push(toBlock(call));
   const resolvedUsage = resolveAnthropicUsage(request, result, content);
   return {
-    id: `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    id: randomHex("msg_"),
     type: "message",
     role: "assistant",
     model,
@@ -125,7 +126,7 @@ export function anthropicSseMessageStart(model: string, index: number): string {
   return `event: message_start\ndata: ${JSON.stringify({
     type: "message_start",
     message: {
-      id: `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+      id: randomHex("msg_"),
       type: "message",
       role: "assistant",
       model,

@@ -19,6 +19,8 @@ import { LANDING_PAGE_HTML } from "./landingPage.js";
 import { runAuthSSE, runDoctorSSE, runDiagnosticsSSE, checkAuthStatus, launchClaudeCode, launchOpenCode, writeSSE, endSSE, pickFolder, performLogout, stopActiveAuthChrome, type ActionEvent } from "./actions.js";
 import { getSystemCapabilities, type SystemCapabilities } from "./system.js";
 import { DEFAULT_MODEL_ID, resolveModelSelection } from "../config/modelCapabilities.js";
+import { randomToken } from "../utils/crypto.js";
+import { SESSION_ID_ENTROPY_BYTES } from "../config/constants.js";
 
 export interface RouteContext {
   security: SecurityOptions;
@@ -45,7 +47,7 @@ function sendText(res: ServerResponse, status: number, body: string, contentType
 }
 
 function makeId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return randomToken(SESSION_ID_ENTROPY_BYTES);
 }
 
 function logRouteError(error: unknown, logger: Logger, latencyMs?: number): void {
@@ -112,6 +114,12 @@ function handleCompletion(ctx: RouteContext, protocol: Protocol, modelFallback: 
     const startedAt = Date.now();
     let stream: ProtocolStream | undefined;
     let anthropicStreaming = false;
+    const downstreamAbort = new AbortController();
+    const abortDownstream = () => downstreamAbort.abort();
+    req.once("aborted", abortDownstream);
+    res.once("close", () => {
+      if (!res.writableEnded) abortDownstream();
+    });
     try {
       const raw = await readBody({ raw: req }, ctx.security.maxBytes);
       const body = JSON.parse(raw.toString("utf8"));
@@ -134,6 +142,7 @@ function handleCompletion(ctx: RouteContext, protocol: Protocol, modelFallback: 
         body: body as Record<string, unknown>,
         stream,
         logger,
+        signal: downstreamAbort.signal,
       });
       if (!normalized.stream) {
         let payload: unknown;
@@ -168,6 +177,8 @@ function handleCompletion(ctx: RouteContext, protocol: Protocol, modelFallback: 
         return;
       }
       routeError(res, error, ctx, requestRef);
+    } finally {
+      req.removeListener("aborted", abortDownstream);
     }
   };
 }

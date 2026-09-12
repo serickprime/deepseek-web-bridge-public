@@ -133,6 +133,11 @@ export class PersistentSessionDocument {
     return cloneLinks(this.snapshot.links);
   }
 
+  getSibling(key: string): unknown {
+    this.assertInitialized();
+    return key in this.snapshot.siblings ? structuredClone(this.snapshot.siblings[key]) : undefined;
+  }
+
   replaceSessions(sessions: AuthSession[]): Promise<void> {
     const nextSessions = cloneSessions(sessions);
     return this.enqueue(snapshot => ({ ...snapshot, sessions: nextSessions }));
@@ -141,6 +146,16 @@ export class PersistentSessionDocument {
   replaceLinks(links: PersistentSessionLink[]): Promise<void> {
     const nextLinks = cloneLinks(links);
     return this.enqueue(snapshot => ({ ...snapshot, links: nextLinks }));
+  }
+
+  replaceSibling(key: string, value: unknown): Promise<void> {
+    if (key === "version" || key === "sessions" || key === "links") {
+      throw persistenceError("Reserved persistent session document field.");
+    }
+    return this.enqueue(snapshot => ({
+      ...snapshot,
+      siblings: { ...snapshot.siblings, [key]: structuredClone(value) },
+    }));
   }
 
   private async load(): Promise<void> {

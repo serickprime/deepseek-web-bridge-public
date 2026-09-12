@@ -24,8 +24,11 @@ export interface AppConfig {
   timeoutMs: number;
   debug: boolean;
   toolDiagnostics: boolean;
+  genericToolRuntimeMode: GenericToolRuntimeMode;
   setupToken: string;
 }
+
+export type GenericToolRuntimeMode = "legacy" | "shadow" | "enabled";
 
 function numberValue(value: unknown, fallback: number): number {
   if (value === undefined || value === null || value === "") return fallback;
@@ -47,6 +50,14 @@ function str(value: unknown, fallback = ""): string {
 function optionalString(value: unknown): string | null {
   const normalized = str(value);
   return normalized ? normalized : null;
+}
+
+function genericToolRuntimeMode(value: unknown): GenericToolRuntimeMode {
+  const normalized = str(value, "enabled").toLowerCase();
+  if (normalized === "legacy" || normalized === "shadow" || normalized === "enabled") {
+    return normalized;
+  }
+  throw new Error("BRIDGE_GENERIC_TOOL_RUNTIME must be legacy, shadow, or enabled.");
 }
 
 function splitList(value: unknown): string[] {
@@ -127,6 +138,7 @@ export function buildConfig(input: NodeJS.ProcessEnv & Record<string, string | u
     timeoutMs: numberValue(get("DS_TIMEOUT_MS"), DEFAULT_TIMEOUT_MS),
     debug: boolValue(get("DS_DEBUG")),
     toolDiagnostics: boolValue(get("BRIDGE_TOOL_DIAGNOSTICS")),
+    genericToolRuntimeMode: genericToolRuntimeMode(get("BRIDGE_GENERIC_TOOL_RUNTIME")),
     setupToken: optionalString(get("SETUP_TOKEN")) ?? "",
   };
 }

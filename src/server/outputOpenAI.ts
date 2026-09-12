@@ -1,4 +1,5 @@
 import type { CanonicalResult } from "../api/canonical.js";
+import { randomHex } from "../utils/crypto.js";
 
 export interface OpenAIChatResponse {
   id: string;
@@ -38,7 +39,7 @@ export function toOpenAIChat(result: CanonicalResult, model: string): OpenAIChat
     }));
   }
   return {
-    id: `chatcmpl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    id: randomHex("chatcmpl-"),
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
@@ -55,7 +56,7 @@ export function toOpenAIChat(result: CanonicalResult, model: string): OpenAIChat
 
 export function openaiSseChunk(index: number, delta: string): string {
   const payload = {
-    id: `chatcmpl-${Date.now().toString(36)}`,
+    id: randomHex("chatcmpl-"),
     object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
     model: "",

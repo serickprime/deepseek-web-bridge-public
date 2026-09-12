@@ -4,14 +4,27 @@ import type { Logger } from "../utils/logger.js";
 import type { CanonicalRequest, CanonicalResult } from "./canonical.js";
 import type { Protocol } from "./normalizeByProtocol.js";
 import type { DeepSeekClient } from "../deepseek/client.js";
+import type { GenericToolRuntimeMode } from "../config/env.js";
 import { KeyedMutex } from "../sessions/mutex.js";
 import type { SessionStore } from "../sessions/sessionStore.js";
 import { resolveClientIdentity, resolveUpstreamIdentity } from "../sessions/sessionResolver.js";
 import { LineageStore } from "../sessions/lineage.js";
+import { generateUpstreamKey } from "../sessions/lineage.js";
 import { buildToolCatalog } from "../tools/toolPrompt.js";
 import { buildToolNames } from "../deepseek/client.js";
 import type { ProtocolStream } from "../server/protocolStream.js";
 import type { CanonicalToolCall } from "./canonical.js";
+import { materializeToolResultMedia } from "./toolResultMedia.js";
+import { prepareExecutionPlanAuthority } from "../tools/executionPlan.js";
+import {
+  actionTurnKey,
+  admitLedgerToolCall,
+  createActionLedger,
+  ledgerComplete,
+  markLedgerActionRunning,
+  outstandingLedgerActions,
+  replayLedgerToolResults,
+} from "../tools/actionLedger.js";
 
 function childLogger(logger: Logger, fields: Record<string, unknown>): Logger {
   return typeof logger.child === "function" ? logger.child(fields) : logger;
@@ -63,6 +76,7 @@ export interface HandlerOptions {
   sessionStore: SessionStore;
   lineage: LineageStore;
   logger: Logger;
+  genericToolRuntimeMode?: GenericToolRuntimeMode;
 }
 
 export interface RunRequest {
@@ -72,6 +86,7 @@ export interface RunRequest {
   body: Record<string, unknown>;
   stream: ProtocolStream;
   logger?: Logger;
+  signal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -117,7 +132,7 @@ export class CompletionHandler {
       }
       linkedUpstream = headerUpstream ?? toolResultUpstream;
     }
-    const upstreamKey = explicitUpstream ?? linkedUpstream ?? `${clientIdentity}:${Date.now()}`;
+    const upstreamKey = explicitUpstream ?? linkedUpstream ?? `${clientIdentity}:${generateUpstreamKey()}`;
     const lineageSource = explicitUpstream
       ? "explicit"
       : headerUpstream && toolResultUpstream
@@ -148,7 +163,7 @@ export class CompletionHandler {
     const authGeneration = deepseek.getAuthGeneration?.() ?? 0;
     return this.mutex.withLock(upstreamKey, async () => {
       try {
-        await deepseek.ensureSession(state, authGeneration, identityLogger);
+        await deepseek.ensureSession(state, authGeneration, identityLogger, input.signal);
         const completionLogger = childLogger(identityLogger, {
           chat_ref: opaqueRef(identityLogger, "chat", state.chatSessionId),
         });
@@ -161,8 +176,59 @@ export class CompletionHandler {
           });
         }
         const toolNames = buildToolNames(request.tools);
+        const turnKey = actionTurnKey(request);
+        if (state.actionLedger && state.actionLedger.turnKey !== turnKey && !ledgerComplete(state.actionLedger)) {
+          throw new BridgeError("A new user action cannot replace an unfinished action ledger on the same lineage.", {
+            code: "SESSION_CONFLICT",
+            status: 409,
+            retryable: false,
+          });
+        }
+        if (!state.actionLedger || state.actionLedger.turnKey !== turnKey) {
+          state.actionLedger = createActionLedger(request, request.tools);
+          prepareExecutionPlanAuthority(
+            state.actionLedger,
+            this.options.genericToolRuntimeMode ?? "legacy",
+          );
+        }
+        const trustedMediaCalls: CanonicalToolCall[] = state.actionLedger.callLedger.calls
+          .filter(call => call.status === "exposed" || call.status === "interrupted")
+          .map(call => ({
+            id: call.callId,
+            type: "function",
+            name: call.toolName,
+            arguments: structuredClone(call.arguments),
+          }));
+        await materializeToolResultMedia(request.messages, {
+          workspaceRoot: state.actionLedger.workspaceRoot,
+          toolCalls: trustedMediaCalls,
+        });
+        replayLedgerToolResults(state.actionLedger, request.messages);
+        await sessionStore.persistActionLedgers();
+        completionLogger.info("action_ledger_state", {
+          stage: "action_ledger",
+          outcome: "ready",
+          action_count: state.actionLedger.actions.length,
+          outstanding_count: outstandingLedgerActions(state.actionLedger).length,
+          unresolved_intent: state.actionLedger.unresolvedIntent,
+          plan_revision: state.actionLedger.plan.revision,
+          plan_update_pending: state.actionLedger.plan.awaitingUpdate,
+          complete: ledgerComplete(state.actionLedger),
+        });
         stream.start();
-        const result = await deepseek.complete(request, state, {}, authGeneration, completionLogger);
+        const result = await deepseek.complete(request, state, {
+          actionLedger: state.actionLedger,
+          onPlanUpdate: async () => {
+            await sessionStore.persistActionLedgers();
+            completionLogger.info("execution_plan_updated", {
+              stage: "execution_plan",
+              outcome: "success",
+              revision: state.actionLedger?.plan.revision,
+              action_count: state.actionLedger?.actions.length,
+            });
+          },
+          signal: input.signal,
+        }, authGeneration, completionLogger);
         if (!result.toolCall && result.content) {
           stream.push({ type: "content", text: result.content });
         }
@@ -177,7 +243,7 @@ export class CompletionHandler {
             outcome: "selected",
             tool_name: result.toolCall.name,
           });
-          const id = `call_${Math.random().toString(36).slice(2, 10)}`;
+          const id = `call_${generateUpstreamKey()}`;
           const call: CanonicalToolCall = {
             id,
             type: "function",
@@ -188,6 +254,17 @@ export class CompletionHandler {
           if (callId && callId !== id) {
             await lineage.record(callId, upstreamKey);
           }
+          const actionId = result.toolCall.actionId
+            ?? admitLedgerToolCall(state.actionLedger, call).actionId;
+          if (!actionId) {
+            throw new BridgeError("Tool call was accepted without an action-ledger binding.", {
+              code: "TOOL_CALL_REQUIRED",
+              status: 502,
+              retryable: false,
+            });
+          }
+          markLedgerActionRunning(state.actionLedger, actionId, id, call);
+          await sessionStore.persistActionLedgers();
           completionLogger.info("tool_exposed", {
             stage: "downstream_emit",
             outcome: "success",
@@ -219,6 +296,7 @@ export class CompletionHandler {
       } catch (error) {
         if (error instanceof BridgeError && (error.code === "DEEPSEEK_HTTP_401" || error.code === "DEEPSEEK_HTTP_403")) {
           sessionStore.reset(upstreamKey);
+          await sessionStore.persistActionLedgers();
           await lineage.removeByUpstreamKey(upstreamKey);
           identityLogger.warn("auth_expired_session_reset", {
             stage: "auth_generation",

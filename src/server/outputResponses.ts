@@ -1,4 +1,5 @@
 import type { CanonicalResult } from "../api/canonical.js";
+import { randomHex } from "../utils/crypto.js";
 
 export interface ResponsesOutputText {
   type: "output_text";
@@ -40,7 +41,7 @@ export function toResponses(result: CanonicalResult, model: string): ResponsesRe
     });
   }
   return {
-    id: `resp_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+    id: randomHex("resp_"),
     object: "response",
     created_at: Math.floor(Date.now() / 1000),
     model,
@@ -59,7 +60,7 @@ export function toResponses(result: CanonicalResult, model: string): ResponsesRe
 export function responsesSseOutputText(delta: string): string {
   return `event: response.output_text.delta\ndata: ${JSON.stringify({
     type: "response.output_text.delta",
-    item_id: `msg_${Date.now().toString(36)}`,
+    item_id: randomHex("msg_"),
     output_index: 0,
     content_index: 0,
     delta,
@@ -69,6 +70,6 @@ export function responsesSseOutputText(delta: string): string {
 export function responsesSseDone(): string {
   return `event: response.completed\ndata: ${JSON.stringify({
     type: "response.completed",
-    response: { id: `resp_${Date.now().toString(36)}`, status: "completed", output: [] },
+    response: { id: randomHex("resp_"), status: "completed", output: [] },
   })}\n\n`;
 }

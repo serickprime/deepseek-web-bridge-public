@@ -107,14 +107,35 @@ function normalizeContent(content: unknown): CanonicalMessage["parts"] {
     } else if (type === "tool_result") {
       const toolUseId = stringField(raw, "tool_use_id", "");
       const innerContent = typeof raw.content === "string" ? raw.content : "";
+      const media: NonNullable<NonNullable<CanonicalMessage["parts"][number]["toolResult"]>["media"]> = [];
       const joined = typeof raw.content === "string"
         ? innerContent
         : Array.isArray(raw.content)
-          ? raw.content.map(part => isBlock(part) ? blockToString(part) : "").join("\n")
+          ? raw.content.map(part => {
+              if (!isBlock(part)) return "";
+              if ((part.type === "document" || part.type === "image") && isRecord(part.source)) {
+                const source = part.source;
+                if (source.type === "base64"
+                  && typeof source.data === "string"
+                  && typeof source.media_type === "string") {
+                  media.push({
+                    type: part.type,
+                    mediaType: source.media_type,
+                    data: source.data,
+                  });
+                }
+              }
+              return blockToString(part);
+            }).filter(Boolean).join("\n")
           : "";
       parts.push({
         type: "tool_result",
-        toolResult: { toolUseId, content: joined, isError: boolField(raw, "is_error", false) },
+        toolResult: {
+          toolUseId,
+          content: joined,
+          isError: boolField(raw, "is_error", false),
+          ...(media.length > 0 ? { media } : {}),
+        },
       });
     }
   }

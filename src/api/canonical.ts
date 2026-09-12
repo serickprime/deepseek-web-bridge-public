@@ -17,6 +17,11 @@ export interface CanonicalMessagePart {
     toolUseId: string;
     content: string;
     isError?: boolean;
+    media?: Array<{
+      type: "document" | "image";
+      mediaType: string;
+      data: string;
+    }>;
   };
 }
 

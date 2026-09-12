@@ -19,6 +19,7 @@ export type BridgeErrorCode =
   | "UPSTREAM_ERROR"
   | "INVALID_REQUEST"
   | "REQUEST_TOO_LARGE"
+  | "CLIENT_DISCONNECTED"
   | "SHUTDOWN_INCOMPLETE";
 
 export interface BridgeErrorOptions {
@@ -64,6 +65,8 @@ export function httpStatusForCode(code: BridgeErrorCode): number {
       return 400;
     case "REQUEST_TOO_LARGE":
       return 413;
+    case "CLIENT_DISCONNECTED":
+      return 499;
     case "UPSTREAM_TIMEOUT":
       return 504;
     default:

@@ -72,8 +72,12 @@ export function buildToolCatalog(tools: CanonicalTool[]): BuiltToolCatalog {
   return { available, unavailableNames, text, utf8Bytes };
 }
 
-export function buildToolPromptFromCatalog(catalog: string): string {
+export function buildToolPromptFromCatalog(
+  catalog: string,
+  options: { planUpdates?: boolean } = {},
+): string {
   if (!catalog) return "";
+  const planUpdates = options.planUpdates ?? true;
 
   return [
     "",
@@ -99,7 +103,7 @@ export function buildToolPromptFromCatalog(catalog: string): string {
     "",
     "4. After receiving a tool_result: automatically continue.",
     "   - If another tool call is needed — call it immediately.",
-    "   - If the work is done — give the final answer.",
+    "   - If the tool workflow is done — return an explicit finish envelope.",
     "   - Do NOT wait for a new user message.",
     "",
     "5. If the user says \"do it\", \"execute\", \"yes\", \"continue\",",
@@ -111,11 +115,12 @@ export function buildToolPromptFromCatalog(catalog: string): string {
     "     Do not invent tool calls when the question can be answered directly.",
     "   - If a tool IS required: return exactly one canonical block:",
     "     <bridge_tool_call>",
-    "     {\"name\":\"tool_name\",\"input\":{}}",
+    "     {\"type\":\"tool_call\",\"name\":\"tool_name\",\"arguments\":{}}",
     "     </bridge_tool_call>",
     "     Only whitespace may appear before or after this single block.",
     "     The JSON name must come from Available tools and input must conform",
     "     exactly to that tool's current Input schema.",
+    "     The envelope must have exactly type, name, and arguments keys.",
     "     Never use Action:, Action Input:, Tool:, Markdown JSON, pseudo-XML,",
     "     a legacy tool_call envelope, or explanations around a tool call.",
     "",
@@ -150,7 +155,7 @@ export function buildToolPromptFromCatalog(catalog: string): string {
     "   C) After every tool_result, check: are there remaining unfulfilled",
     "      actions from the user request?",
     "      - If YES: immediately call the next tool.",
-    "      - If NO: give the final answer.",
+    "      - If NO: return one explicit finish envelope.",
     "   D) NEVER write \"created\", \"read\", \"verified\", \"done\", \"written\"",
     "      or similar claims unless the corresponding tool_result exists",
     "      in this turn's conversation.",
@@ -170,6 +175,23 @@ export function buildToolPromptFromCatalog(catalog: string): string {
     "      Do NOT claim success for a failed action.",
     "   E) When in doubt, perform an extra verification tool call rather",
     "      than claiming completion without proof.",
+    "   F) After any tool workflow, plain final text is invalid. Return:",
+    "      <bridge_tool_call>",
+    "      {\"type\":\"finish\",\"status\":\"complete\",\"text\":\"FINAL_ANSWER\",\"evidence_call_ids\":[\"call_id\"]}",
+    "      </bridge_tool_call>",
+    "      evidence_call_ids must list the real successful call IDs that",
+    "      support every mandatory action. Never invent an evidence ID.",
+    "      If a real action failed and safe recovery is impossible, use status",
+    "      blocked, include a non-empty reason, and cite the failed call ID.",
+    ...(planUpdates ? [
+      "      If BRIDGE EXECUTION PLAN says awaiting_update=true or initial_update_required=true, return one atomic tool_call carrying its plan_update:",
+      "      <bridge_tool_call>",
+      "      {\"type\":\"tool_call\",\"name\":\"ToolName\",\"arguments\":{},\"plan_update\":{\"base_revision\":0,\"steps\":[{\"id\":\"step-id\",\"kind\":\"action\",\"description\":\"required work\",\"mandatory\":true,\"dependencies\":[],\"required_tool_names\":[\"ToolName\"],\"expected_arguments\":{},\"opens_discovery\":false}]}}",
+      "      </bridge_tool_call>",
+      "      Use the current revision shown by the Bridge, append only newly discovered mandatory steps, and never rewrite or remove existing steps.",
+      "      The outer tool_call must be the first executable step from that same plan revision and must match its exact tool schema and arguments.",
+      "      If the update intentionally leaves no executable pending step, use a plan_update envelope without a tool instead.",
+    ] : []),
     "",
     "11. PRIORITY RULE (mandatory):",
     "   The CURRENT user request is authoritative.",

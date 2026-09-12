@@ -5,6 +5,7 @@ import { SessionManager } from "./auth/sessionManager.js";
 import { PowSolver } from "./deepseek/pow.js";
 import { DeepSeekClient } from "./deepseek/client.js";
 import type { AuthCredentials } from "./deepseek/client.js";
+import { UpstreamController } from "./deepseek/upstreamController.js";
 import { CompletionHandler } from "./api/handler.js";
 import { SessionStore } from "./sessions/sessionStore.js";
 import { LineageStore } from "./sessions/lineage.js";
@@ -18,6 +19,7 @@ import type { RouteContext } from "./server/routes.js";
 import { bridgeModelList } from "./config/modelCapabilities.js";
 import { stopActiveAuthChrome, stopLaunchedProcesses } from "./server/actions.js";
 import { BridgeError } from "./utils/errors.js";
+import { MAX_UPSTREAM_RETRIES } from "./config/constants.js";
 
 export interface AppHandle {
   server: BridgeServer;
@@ -127,6 +129,7 @@ export async function resetUpstreamAccountState(
   lineage: LineageStore,
 ): Promise<void> {
   sessionStore.clear();
+  await sessionStore.persistActionLedgers();
   await lineage.clear();
 }
 
@@ -150,7 +153,7 @@ export function buildApp(): AppHandle {
   const persistentSessions = new PersistentSessionDocument(config.sessionsFile);
   const sessionStorage = new FileSessionStorage(persistentSessions);
   const sessionManager = new SessionManager(sessionStorage, { logger });
-  const sessionStore = new SessionStore();
+  const sessionStore = new SessionStore(undefined, undefined, persistentSessions);
   const lineage = new LineageStore(persistentSessions);
   let initialized = false;
   let initPromise: Promise<void> | null = null;
@@ -160,6 +163,7 @@ export function buildApp(): AppHandle {
       await persistentSessions.init();
       await sessionManager.init();
       await lineage.init();
+      await sessionStore.init();
       initialized = true;
     })();
     return initPromise;
@@ -169,6 +173,7 @@ export function buildApp(): AppHandle {
     wasmCacheDir: config.dataDir,
     logger,
   });
+  const upstreamController = new UpstreamController();
 
   const deepseek = new DeepSeekClient({
     baseUrl: config.baseUrl,
@@ -178,10 +183,18 @@ export function buildApp(): AppHandle {
     logger,
     redactor,
     timeoutMs: config.timeoutMs,
-    maxRetries: config.proxyApiKey ? 2 : 0,
+    maxRetries: MAX_UPSTREAM_RETRIES,
+    upstreamController,
+    genericToolRuntimeMode: config.genericToolRuntimeMode,
   });
 
-  const handler = new CompletionHandler({ deepseek, sessionStore, lineage, logger });
+  const handler = new CompletionHandler({
+    deepseek,
+    sessionStore,
+    lineage,
+    logger,
+    genericToolRuntimeMode: config.genericToolRuntimeMode,
+  });
 
   const routeContext: RouteContext = {
     security: {
